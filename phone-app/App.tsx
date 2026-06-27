@@ -1,11 +1,14 @@
 import { startTransition, useEffect, useRef, useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet, SafeAreaView, StatusBar as RNStatusBar,
+  Animated,
+  KeyboardAvoidingView, Platform,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import Screen from './Screen';
 import Terminal from './Terminal';
 import { C, MONO } from './theme';
+import useKeyboardLift from './useKeyboardLift';
 
 const CMD_PORT = 3001;
 const STREAM_PORT = 3002;
@@ -27,6 +30,7 @@ export default function App() {
   const [screen, setScreen] = useState({ width: 1920, height: 1200 });
   const ws = useRef<WebSocket | null>(null);
   const statusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const connectLift = useKeyboardLift({ factor: 0.42, maxLift: 220 });
 
   const clearStatusTimer = () => {
     if (statusTimer.current) {
@@ -166,33 +170,39 @@ export default function App() {
   return (
     <SafeAreaView style={styles.screen}>
       <StatusBar style="light" />
-      <View style={styles.connectBody}>
-        <Text style={styles.huge}>MAC{'\n'}N PHONE</Text>
-        <View style={styles.rule} />
-        <Text style={styles.label}>HOST</Text>
-        <TextInput
-          style={styles.field}
-          placeholder="192.168.0.108"
-          placeholderTextColor={C.muted}
-          value={host}
-          onChangeText={setHost}
-          autoCapitalize="none"
-          keyboardType="numbers-and-punctuation"
-        />
-        <Text style={[styles.label, { marginTop: 24 }]}>SECRET</Text>
-        <TextInput
-          style={styles.field}
-          placeholder="token"
-          placeholderTextColor={C.muted}
-          value={token}
-          onChangeText={setToken}
-          autoCapitalize="none"
-          secureTextEntry
-        />
-        <TouchableOpacity style={[styles.outline, { marginTop: 40 }]} onPress={connect}>
-          <Text style={styles.outlineText}>CONNECT</Text>
-        </TouchableOpacity>
-      </View>
+      <KeyboardAvoidingView
+        style={styles.flex}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={RNStatusBar.currentHeight ?? 0}
+      >
+        <Animated.View style={[styles.connectBody, connectLift]}>
+          <Text style={styles.huge}>MAC{'\n'}N PHONE</Text>
+          <View style={styles.rule} />
+          <Text style={styles.label}>HOST</Text>
+          <TextInput
+            style={styles.field}
+            placeholder="192.168.0.108"
+            placeholderTextColor={C.muted}
+            value={host}
+            onChangeText={setHost}
+            autoCapitalize="none"
+            keyboardType="numbers-and-punctuation"
+          />
+          <Text style={[styles.label, { marginTop: 24 }]}>SECRET</Text>
+          <TextInput
+            style={styles.field}
+            placeholder="token"
+            placeholderTextColor={C.muted}
+            value={token}
+            onChangeText={setToken}
+            autoCapitalize="none"
+            secureTextEntry
+          />
+          <TouchableOpacity style={[styles.outline, { marginTop: 40 }]} onPress={connect}>
+            <Text style={styles.outlineText}>CONNECT</Text>
+          </TouchableOpacity>
+        </Animated.View>
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }

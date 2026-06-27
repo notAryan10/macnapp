@@ -1,11 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   View, PanResponder, StyleSheet, Text, TouchableOpacity, TextInput, LayoutChangeEvent,
+  Animated,
+  KeyboardAvoidingView, Platform,
 } from 'react-native';
 import {
   RTCPeerConnection, RTCSessionDescription, RTCIceCandidate, RTCView, MediaStream,
 } from 'react-native-webrtc';
 import { C, MONO } from './theme';
+import useKeyboardLift from './useKeyboardLift';
 
 type Mode = 'MOUSE' | 'DRAG';
 const MODES: Mode[] = ['MOUSE', 'DRAG'];
@@ -79,6 +82,7 @@ export default function Screen({ ws, screen }: Props) {
   const [zoom, setZoom] = useState(RESET_ZOOM);
   const kbBuf = useRef('');
   const socketRef = useRef<WebSocket | null>(ws);
+  const controlsLift = useKeyboardLift({ factor: 0.5, maxLift: 240 });
 
   useEffect(() => {
     socketRef.current = ws;
@@ -241,7 +245,10 @@ export default function Screen({ ws, screen }: Props) {
   const aspect = screen.width / screen.height;
 
   return (
-    <View style={styles.container}>
+    <KeyboardAvoidingView
+      style={styles.container}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+    >
       <View style={styles.stage}>
         <View style={[styles.frame, { aspectRatio: aspect }]} onLayout={onLayout} {...pan.panHandlers}>
           {stream ? (
@@ -266,41 +273,43 @@ export default function Screen({ ws, screen }: Props) {
         {stream && <ScrollStick send={send} />}
       </View>
 
-      <View style={styles.bar}>
-        <View style={styles.modes}>
-          {MODES.map((m) => (
-            <TouchableOpacity key={m} style={styles.mode} onPress={() => setMode(m)}>
-              <Text style={[styles.modeText, mode === m && styles.modeActive]}>{m}</Text>
+      <Animated.View style={[styles.controls, controlsLift]}>
+        <View style={styles.bar}>
+          <View style={styles.modes}>
+            {MODES.map((m) => (
+              <TouchableOpacity key={m} style={styles.mode} onPress={() => setMode(m)}>
+                <Text style={[styles.modeText, mode === m && styles.modeActive]}>{m}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+          <View style={styles.row}>
+            <TouchableOpacity style={styles.btn} onPress={() => send({ type: 'click', button: 'left' })}>
+              <Text style={styles.btnText}>L</Text>
             </TouchableOpacity>
-          ))}
+            <TouchableOpacity style={styles.kb} onPress={() => setKbOpen((v) => !v)}>
+              <Text style={styles.kbIcon}>⌨</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.btn} onPress={() => send({ type: 'click', button: 'right' })}>
+              <Text style={styles.btnText}>R</Text>
+            </TouchableOpacity>
+          </View>
         </View>
-        <View style={styles.row}>
-          <TouchableOpacity style={styles.btn} onPress={() => send({ type: 'click', button: 'left' })}>
-            <Text style={styles.btnText}>L</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.kb} onPress={() => setKbOpen((v) => !v)}>
-            <Text style={styles.kbIcon}>⌨</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.btn} onPress={() => send({ type: 'click', button: 'right' })}>
-            <Text style={styles.btnText}>R</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
 
-      {kbOpen && (
-        <TextInput
-          style={styles.kbInput}
-          autoFocus
-          autoCapitalize="none"
-          autoCorrect={false}
-          placeholder="type to send keys…"
-          placeholderTextColor={C.muted}
-          onChangeText={onKb}
-          onSubmitEditing={() => { send({ type: 'key', key: 'enter' }); kbBuf.current = ''; }}
-          blurOnSubmit={false}
-        />
-      )}
-    </View>
+        {kbOpen && (
+          <TextInput
+            style={styles.kbInput}
+            autoFocus
+            autoCapitalize="none"
+            autoCorrect={false}
+            placeholder="type to send keys…"
+            placeholderTextColor={C.muted}
+            onChangeText={onKb}
+            onSubmitEditing={() => { send({ type: 'key', key: 'enter' }); kbBuf.current = ''; }}
+            blurOnSubmit={false}
+          />
+        )}
+      </Animated.View>
+    </KeyboardAvoidingView>
   );
 }
 
@@ -315,6 +324,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12, paddingVertical: 6, borderRadius: 14, borderWidth: 1, borderColor: C.faint,
   },
   resetText: { color: C.fg, fontSize: 12, fontFamily: MONO },
+  controls: { backgroundColor: C.bg },
   bar: { borderTopWidth: 1, borderTopColor: C.line },
   modes: { flexDirection: 'row' },
   mode: { flex: 1, paddingVertical: 12, alignItems: 'center' },

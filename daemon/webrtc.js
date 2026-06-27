@@ -5,6 +5,10 @@ const { spawn } = require('child_process');
 const SCREEN = process.env.AVF_SCREEN_INDEX || '1';
 const RTP_PORT = Number(process.env.RTP_PORT || 5004);
 const PT = 96; // dynamic payload type for H.264, must match ffmpeg -payload_type
+// Quality knobs. Higher = sharper but more lag/bandwidth. Tuned for smoothness;
+// raise STREAM_WIDTH for crisper zoom if your Wi-Fi can take it.
+const WIDTH = process.env.STREAM_WIDTH || '1280';   // px; -2 keeps aspect
+const BITRATE = process.env.STREAM_BITRATE || '6000k';
 
 // One screen-streaming session per phone connection. ffmpeg runs on demand so
 // there's never a second avfoundation capture fighting the first.
@@ -45,10 +49,11 @@ function createSession(ws) {
     ff = spawn('ffmpeg', [
       '-f', 'avfoundation', '-capture_cursor', '1', '-framerate', '30',
       '-use_wallclock_as_timestamps', '1', '-i', SCREEN,
-      '-fps_mode', 'cfr', '-r', '30', '-vf', 'scale=1280:-2',
-      // libx264 baseline + zerolatency = the WebRTC-friendly, low-latency choice
-      '-c:v', 'libx264', '-profile:v', 'baseline', '-level', '3.1',
-      '-pix_fmt', 'yuv420p', '-tune', 'zerolatency', '-b:v', '3000k', '-g', '60', '-an',
+      '-fps_mode', 'cfr', '-r', '30', '-vf', `scale=${WIDTH}:-2`,
+      // hardware encoder (Apple media engine) — low encode latency, baseline so
+      // the SDP profile-level-id (42e01f) still matches and there are no B-frames.
+      '-c:v', 'h264_videotoolbox', '-realtime', '1', '-profile:v', 'baseline',
+      '-pix_fmt', 'yuv420p', '-b:v', BITRATE, '-g', '60', '-an',
       '-f', 'rtp', '-payload_type', String(PT), `rtp://127.0.0.1:${RTP_PORT}?pkt_size=1200`,
     ], { stdio: ['ignore', 'ignore', 'inherit'] });
 

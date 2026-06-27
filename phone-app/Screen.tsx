@@ -9,6 +9,7 @@ import { C, MONO } from './theme';
 
 type Mode = 'MOUSE' | 'SCROLL' | 'DRAG';
 const MODES: Mode[] = ['MOUSE', 'SCROLL', 'DRAG'];
+const MAX_ZOOM = 4;
 
 type Props = {
   ws: WebSocket | null;
@@ -19,15 +20,14 @@ export default function Screen({ ws, screen }: Props) {
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [mode, setMode] = useState<Mode>('MOUSE');
   const [kbOpen, setKbOpen] = useState(false);
+  const [zoom, setZoom] = useState({ s: 1, tx: 0, ty: 0 });
   const kbBuf = useRef('');
-  const pcRef = useRef<RTCPeerConnection | null>(null);
   const send = (m: object) => ws?.readyState === 1 && ws.send(JSON.stringify(m));
 
   // ── WebRTC: phone is the answerer; daemon sends the offer ──
   useEffect(() => {
     if (!ws) return;
     const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
-    pcRef.current = pc;
 
     (pc as any).addEventListener('track', (e: any) => {
       if (e.streams && e.streams[0]) setStream(e.streams[0]);
@@ -54,25 +54,30 @@ export default function Screen({ ws, screen }: Props) {
       ws.removeEventListener('message', onMsg);
       send({ type: 'webrtc-stop' });
       pc.close();
-      pcRef.current = null;
     };
   }, [ws]);
 
-  // ── touch -> cursor (unchanged control plane) ──
+  // ── shared refs for control + zoom ──
   const modeRef = useRef(mode); modeRef.current = mode;
+  const zoomRef = useRef(zoom); zoomRef.current = zoom;
   const size = useRef({ w: 1, h: 1 });
   const pendingAbs = useRef<{ nx: number; ny: number } | null>(null);
   const scrollAcc = useRef({ dx: 0, dy: 0 });
   const lastTouch = useRef<{ x: number; y: number } | null>(null);
+  const pinch = useRef<{ dist: number; mx: number; my: number } | null>(null);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
   const startedAt = useRef(0);
   const moved = useRef(0);
 
   const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
-  const norm = (lx: number, ly: number) => ({
-    nx: clamp01(lx / size.current.w),
-    ny: clamp01(ly / size.current.h),
-  });
+  // account for current zoom (transformOrigin: top-left → screen = content*s + t)
+  const norm = (lx: number, ly: number) => {
+    const z = zoomRef.current;
+    return {
+      nx: clamp01((lx - z.tx) / z.s / size.current.w),
+      ny: clamp01((ly - z.ty) / z.s / size.current.h),
+    };
+  };
 
   const flush = () => {
     if (modeRef.current === 'SCROLL') {
@@ -84,6 +89,8 @@ export default function Screen({ ws, screen }: Props) {
     }
   };
 
+  const stopTimer = () => { if (timer.current) { clearInterval(timer.current); timer.current = null; } };
+
   const pan = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
@@ -94,6 +101,7 @@ export default function Screen({ ws, screen }: Props) {
         moved.current = 0;
         lastTouch.current = { x: locationX, y: locationY };
         scrollAcc.current = { dx: 0, dy: 0 };
+        pinch.current = null;
         if (modeRef.current !== 'SCROLL') {
           pendingAbs.current = norm(locationX, locationY);
           if (modeRef.current === 'DRAG') { flush(); send({ type: 'mousedown', button: 'left' }); }
@@ -101,28 +109,53 @@ export default function Screen({ ws, screen }: Props) {
         timer.current = setInterval(flush, 16);
       },
       onPanResponderMove: (e) => {
+        const touches = e.nativeEvent.touches;
+
+        // two fingers → pinch-zoom + pan the view locally (no cursor commands)
+        if (touches.length >= 2) {
+          stopTimer();
+          const a = touches[0], b = touches[1];
+          const dist = Math.hypot(a.locationX - b.locationX, a.locationY - b.locationY);
+          const mx = (a.locationX + b.locationX) / 2;
+          const my = (a.locationY + b.locationY) / 2;
+          if (!pinch.current) { pinch.current = { dist, mx, my }; lastTouch.current = null; return; }
+          const z = zoomRef.current;
+          const factor = dist / pinch.current.dist;
+          let ns = Math.max(1, Math.min(MAX_ZOOM, z.s * factor));
+          // keep the point under the pinch midpoint fixed, plus follow the pan
+          let ntx = mx - (mx - z.tx) * (ns / z.s) + (mx - pinch.current.mx);
+          let nty = my - (my - z.ty) * (ns / z.s) + (my - pinch.current.my);
+          if (ns <= 1.001) { ns = 1; ntx = 0; nty = 0; }
+          setZoom({ s: ns, tx: ntx, ty: nty });
+          pinch.current = { dist, mx, my };
+          return;
+        }
+
+        // single finger → cursor control
+        pinch.current = null;
+        if (!timer.current) timer.current = setInterval(flush, 16);
         const { locationX, locationY } = e.nativeEvent;
+        if (!lastTouch.current) { lastTouch.current = { x: locationX, y: locationY }; }
         if (modeRef.current === 'SCROLL') {
-          if (lastTouch.current) {
-            scrollAcc.current.dx += Math.round((locationX - lastTouch.current.x) * 0.5);
-            scrollAcc.current.dy += Math.round((locationY - lastTouch.current.y) * 0.5);
-          }
+          scrollAcc.current.dx += Math.round((locationX - lastTouch.current.x) * 0.5);
+          scrollAcc.current.dy += Math.round((locationY - lastTouch.current.y) * 0.5);
         } else {
           pendingAbs.current = norm(locationX, locationY);
         }
-        if (lastTouch.current) {
-          moved.current += Math.abs(locationX - lastTouch.current.x) + Math.abs(locationY - lastTouch.current.y);
-        }
+        moved.current += Math.abs(locationX - lastTouch.current.x) + Math.abs(locationY - lastTouch.current.y);
         lastTouch.current = { x: locationX, y: locationY };
       },
       onPanResponderRelease: () => {
-        if (timer.current) clearInterval(timer.current);
+        stopTimer();
         flush();
-        if (modeRef.current === 'DRAG') send({ type: 'mouseup', button: 'left' });
-        else if (modeRef.current === 'MOUSE' && Date.now() - startedAt.current < 220 && moved.current < 10) {
-          send({ type: 'click', button: 'left' });
+        if (!pinch.current) {
+          if (modeRef.current === 'DRAG') send({ type: 'mouseup', button: 'left' });
+          else if (modeRef.current === 'MOUSE' && Date.now() - startedAt.current < 220 && moved.current < 10) {
+            send({ type: 'click', button: 'left' });
+          }
         }
         lastTouch.current = null;
+        pinch.current = null;
       },
     })
   ).current;
@@ -145,11 +178,24 @@ export default function Screen({ ws, screen }: Props) {
       <View style={styles.stage}>
         <View style={[styles.frame, { aspectRatio: aspect }]} onLayout={onLayout} {...pan.panHandlers}>
           {stream ? (
-            <RTCView streamURL={stream.toURL()} style={styles.video} objectFit="contain" />
+            <View
+              style={[
+                StyleSheet.absoluteFill,
+                { transformOrigin: 'top left', transform: [{ translateX: zoom.tx }, { translateY: zoom.ty }, { scale: zoom.s }] },
+              ]}
+              pointerEvents="none"
+            >
+              <RTCView streamURL={stream.toURL()} style={styles.video} objectFit="contain" />
+            </View>
           ) : (
             <Text style={styles.connecting}>NEGOTIATING STREAM…</Text>
           )}
         </View>
+        {zoom.s > 1 && (
+          <TouchableOpacity style={styles.reset} onPress={() => setZoom({ s: 1, tx: 0, ty: 0 })}>
+            <Text style={styles.resetText}>{zoom.s.toFixed(1)}× · reset</Text>
+          </TouchableOpacity>
+        )}
       </View>
 
       <View style={styles.bar}>
@@ -193,9 +239,14 @@ export default function Screen({ ws, screen }: Props) {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.bg },
   stage: { flex: 1, justifyContent: 'center' },
-  frame: { width: '100%', backgroundColor: '#000', alignItems: 'center', justifyContent: 'center' },
+  frame: { width: '100%', backgroundColor: '#000', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
   video: { width: '100%', height: '100%' },
   connecting: { color: C.muted, fontSize: 13, letterSpacing: 2 },
+  reset: {
+    position: 'absolute', top: 12, right: 12, backgroundColor: '#000a',
+    paddingHorizontal: 12, paddingVertical: 6, borderRadius: 14, borderWidth: 1, borderColor: C.faint,
+  },
+  resetText: { color: C.fg, fontSize: 12, fontFamily: MONO },
   bar: { borderTopWidth: 1, borderTopColor: C.line },
   modes: { flexDirection: 'row' },
   mode: { flex: 1, paddingVertical: 12, alignItems: 'center' },

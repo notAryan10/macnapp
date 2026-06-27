@@ -6,13 +6,32 @@
     "orientation": "default",
     "userInterfaceStyle": "dark",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bitcode": false
     },
     "android": {
-      "package": "com.macnphone.app"
+      "package": "com.macnphone.app",
+      "permissions": [
+        "android.permission.ACCESS_NETWORK_STATE",
+        "android.permission.CAMERA",
+        "android.permission.INTERNET",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.SYSTEM_ALERT_WINDOW",
+        "android.permission.WAKE_LOCK",
+        "android.permission.BLUETOOTH"
+      ]
     },
     "plugins": [
-      "expo-asset"
-    ]
+      "expo-asset",
+      "expo-dev-client",
+      "@config-plugins/react-native-webrtc"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "6afedd17-32c5-492a-b150-2ebf502ea0b9"
+      }
+    },
+    "owner": "notaryan"
   }
 }

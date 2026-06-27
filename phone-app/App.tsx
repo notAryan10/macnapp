@@ -79,7 +79,7 @@ export default function App() {
           </TouchableOpacity>
         </View>
         <View style={styles.flex}>
-          {view === 'screen' && <Screen ws={ws.current} host={host} streamPort={STREAM_PORT} screen={screen} />}
+          {view === 'screen' && <Screen ws={ws.current} screen={screen} />}
           {view === 'terminal' && <Terminal ws={ws.current} />}
         </View>
       </SafeAreaView>

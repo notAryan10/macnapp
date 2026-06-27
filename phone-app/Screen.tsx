@@ -1,8 +1,10 @@
-import { useRef, useState } from 'react';
+import { useRef, useState, useEffect } from 'react';
 import {
   View, PanResponder, StyleSheet, Text, TouchableOpacity, TextInput, LayoutChangeEvent,
 } from 'react-native';
-import { useVideoPlayer, VideoView } from 'expo-video';
+import {
+  RTCPeerConnection, RTCSessionDescription, RTCIceCandidate, RTCView, MediaStream,
+} from 'react-native-webrtc';
 import { C, MONO } from './theme';
 
 type Mode = 'MOUSE' | 'SCROLL' | 'DRAG';
@@ -10,22 +12,55 @@ const MODES: Mode[] = ['MOUSE', 'SCROLL', 'DRAG'];
 
 type Props = {
   ws: WebSocket | null;
-  host: string;
-  streamPort: number;
   screen: { width: number; height: number };
 };
 
-export default function Screen({ ws, host, streamPort, screen }: Props) {
-  const ip = host.trim().split(':')[0];
-  const player = useVideoPlayer(`http://${ip}:${streamPort}/index.m3u8`, (p) => { p.loop = false; p.play(); });
-
+export default function Screen({ ws, screen }: Props) {
+  const [stream, setStream] = useState<MediaStream | null>(null);
   const [mode, setMode] = useState<Mode>('MOUSE');
   const [kbOpen, setKbOpen] = useState(false);
   const kbBuf = useRef('');
+  const pcRef = useRef<RTCPeerConnection | null>(null);
   const send = (m: object) => ws?.readyState === 1 && ws.send(JSON.stringify(m));
 
+  // ── WebRTC: phone is the answerer; daemon sends the offer ──
+  useEffect(() => {
+    if (!ws) return;
+    const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+    pcRef.current = pc;
+
+    (pc as any).addEventListener('track', (e: any) => {
+      if (e.streams && e.streams[0]) setStream(e.streams[0]);
+    });
+    (pc as any).addEventListener('icecandidate', (e: any) => {
+      if (e.candidate) send({ type: 'webrtc-ice', candidate: e.candidate });
+    });
+
+    const onMsg = async (ev: MessageEvent) => {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === 'webrtc-offer') {
+        await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: msg.sdp }));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        send({ type: 'webrtc-answer', sdp: answer.sdp });
+      } else if (msg.type === 'webrtc-ice' && msg.candidate) {
+        try { await pc.addIceCandidate(new RTCIceCandidate(msg.candidate)); } catch {}
+      }
+    };
+    ws.addEventListener('message', onMsg);
+    send({ type: 'webrtc-start' });
+
+    return () => {
+      ws.removeEventListener('message', onMsg);
+      send({ type: 'webrtc-stop' });
+      pc.close();
+      pcRef.current = null;
+    };
+  }, [ws]);
+
+  // ── touch -> cursor (unchanged control plane) ──
   const modeRef = useRef(mode); modeRef.current = mode;
-  const size = useRef({ w: 1, h: 1 });               // video container px size
+  const size = useRef({ w: 1, h: 1 });
   const pendingAbs = useRef<{ nx: number; ny: number } | null>(null);
   const scrollAcc = useRef({ dx: 0, dy: 0 });
   const lastTouch = useRef<{ x: number; y: number } | null>(null);
@@ -59,9 +94,7 @@ export default function Screen({ ws, host, streamPort, screen }: Props) {
         moved.current = 0;
         lastTouch.current = { x: locationX, y: locationY };
         scrollAcc.current = { dx: 0, dy: 0 };
-        if (modeRef.current === 'SCROLL') {
-          // nothing to send yet
-        } else {
+        if (modeRef.current !== 'SCROLL') {
           pendingAbs.current = norm(locationX, locationY);
           if (modeRef.current === 'DRAG') { flush(); send({ type: 'mousedown', button: 'left' }); }
         }
@@ -87,7 +120,7 @@ export default function Screen({ ws, host, streamPort, screen }: Props) {
         flush();
         if (modeRef.current === 'DRAG') send({ type: 'mouseup', button: 'left' });
         else if (modeRef.current === 'MOUSE' && Date.now() - startedAt.current < 220 && moved.current < 10) {
-          send({ type: 'click', button: 'left' }); // tap = click where you touched
+          send({ type: 'click', button: 'left' });
         }
         lastTouch.current = null;
       },
@@ -95,8 +128,7 @@ export default function Screen({ ws, host, streamPort, screen }: Props) {
   ).current;
 
   const onLayout = (e: LayoutChangeEvent) => {
-    const { width, height } = e.nativeEvent.layout;
-    size.current = { w: width, h: height };
+    size.current = { w: e.nativeEvent.layout.width, h: e.nativeEvent.layout.height };
   };
 
   const onKb = (t: string) => {
@@ -112,7 +144,11 @@ export default function Screen({ ws, host, streamPort, screen }: Props) {
     <View style={styles.container}>
       <View style={styles.stage}>
         <View style={[styles.frame, { aspectRatio: aspect }]} onLayout={onLayout} {...pan.panHandlers}>
-          <VideoView style={styles.video} player={player} contentFit="fill" nativeControls={false} pointerEvents="none" />
+          {stream ? (
+            <RTCView streamURL={stream.toURL()} style={styles.video} objectFit="contain" />
+          ) : (
+            <Text style={styles.connecting}>NEGOTIATING STREAM…</Text>
+          )}
         </View>
       </View>
 
@@ -157,8 +193,9 @@ export default function Screen({ ws, host, streamPort, screen }: Props) {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.bg },
   stage: { flex: 1, justifyContent: 'center' },
-  frame: { width: '100%', backgroundColor: '#000' },
+  frame: { width: '100%', backgroundColor: '#000', alignItems: 'center', justifyContent: 'center' },
   video: { width: '100%', height: '100%' },
+  connecting: { color: C.muted, fontSize: 13, letterSpacing: 2 },
   bar: { borderTopWidth: 1, borderTopColor: C.line },
   modes: { flexDirection: 'row' },
   mode: { flex: 1, paddingVertical: 12, alignItems: 'center' },

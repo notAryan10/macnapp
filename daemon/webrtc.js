@@ -54,8 +54,7 @@ function createSession(ws) {
       // the SDP profile-level-id (42e01f) still matches and there are no B-frames.
       '-c:v', 'h264_videotoolbox', '-realtime', '1', '-profile:v', 'baseline',
       '-pix_fmt', 'yuv420p', '-b:v', BITRATE,
-      // keyframe every 1s so a dropped packet recovers in ≤1s instead of freezing
-      '-g', '30', 'expr:gte(t,n_forced*1)', '-an',
+      '-g', '30', '-an',  // keyframe every 1s → a dropped packet recovers in ≤1s
       '-f', 'rtp', '-payload_type', String(PT), `rtp://127.0.0.1:${RTP_PORT}?pkt_size=1200`,
     ], { stdio: ['ignore', 'ignore', 'inherit'] });
 

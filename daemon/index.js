@@ -37,6 +37,7 @@ wss.on('connection', (ws, req) => {
       case 'key': input.typeKey(msg); break;
       case 'type': input.typeString(msg); break;
       case 'term_input': term.write(msg.data); break;
+      case 'term_resize': try { term.resize(msg.cols, msg.rows); } catch {} break;
       case 'webrtc-start': rtc.start().catch((e) => console.error('rtc start', e)); break;
       case 'webrtc-answer': rtc.onAnswer(msg.sdp); break;
       case 'webrtc-ice': rtc.onIce(msg.candidate); break;

@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { startTransition, useEffect, useRef, useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet, SafeAreaView, StatusBar as RNStatusBar,
 } from 'react-native';
@@ -26,25 +26,73 @@ export default function App() {
   const [view, setView] = useState<View_ | null>(null);
   const [screen, setScreen] = useState({ width: 1920, height: 1200 });
   const ws = useRef<WebSocket | null>(null);
+  const statusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearStatusTimer = () => {
+    if (statusTimer.current) {
+      clearTimeout(statusTimer.current);
+      statusTimer.current = null;
+    }
+  };
+
+  useEffect(() => () => {
+    clearStatusTimer();
+    ws.current?.close();
+    ws.current = null;
+  }, []);
 
   const connect = () => {
     const ip = host.trim().split(':')[0];
     if (!ip) return;
+    clearStatusTimer();
+    ws.current?.close();
     setPhase('connecting');
     setStatus('OPENING SOCKET…');
     const sock = new WebSocket(`ws://${ip}:${CMD_PORT}?token=${encodeURIComponent(token)}`);
-    setTimeout(() => setStatus('VERIFYING HANDSHAKE…'), 400);
+    ws.current = sock;
+    statusTimer.current = setTimeout(() => {
+      if (ws.current === sock && sock.readyState === WebSocket.CONNECTING) {
+        setStatus('VERIFYING HANDSHAKE…');
+      }
+    }, 400);
     sock.addEventListener('message', (e) => {
-      const msg = JSON.parse(e.data);
+      let msg;
+      try {
+        msg = JSON.parse(e.data);
+      } catch {
+        return;
+      }
       if (msg.type === 'screen') setScreen({ width: msg.width, height: msg.height });
     });
-    sock.onopen = () => { setPhase('connected'); setView(null); };
-    sock.onclose = () => { setPhase('idle'); ws.current = null; };
-    sock.onerror = () => { setStatus('CONNECTION FAILED'); };
-    ws.current = sock;
+    sock.onopen = () => {
+      clearStatusTimer();
+      startTransition(() => {
+        setPhase('connected');
+        setView(null);
+        setStatus('');
+      });
+    };
+    sock.onclose = () => {
+      clearStatusTimer();
+      if (ws.current === sock) {
+        ws.current = null;
+        setPhase('idle');
+        setStatus('');
+      }
+    };
+    sock.onerror = () => {
+      clearStatusTimer();
+      setStatus('CONNECTION FAILED');
+    };
   };
 
-  const abort = () => { ws.current?.close(); ws.current = null; setPhase('idle'); };
+  const abort = () => {
+    clearStatusTimer();
+    ws.current?.close();
+    ws.current = null;
+    setPhase('idle');
+    setStatus('');
+  };
 
   // ── connecting ───────────────────────────────────────────────
   if (phase === 'connecting') {

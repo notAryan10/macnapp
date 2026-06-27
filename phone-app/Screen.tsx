@@ -1,4 +1,4 @@
-import { useRef, useState, useEffect } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   View, PanResponder, StyleSheet, Text, TouchableOpacity, TextInput, LayoutChangeEvent,
 } from 'react-native';
@@ -10,6 +10,7 @@ import { C, MONO } from './theme';
 type Mode = 'MOUSE' | 'DRAG';
 const MODES: Mode[] = ['MOUSE', 'DRAG'];
 const MAX_ZOOM = 4;
+const RESET_ZOOM = { s: 1, tx: 0, ty: 0 };
 
 // Continuous-scroll joystick: deflection sets scroll speed+direction, like Macky.
 function ScrollStick({ send }: { send: (m: object) => void }) {
@@ -46,6 +47,10 @@ function ScrollStick({ send }: { send: (m: object) => void }) {
     })
   ).current;
 
+  useEffect(() => () => {
+    if (timer.current) clearInterval(timer.current);
+  }, []);
+
   return (
     <View style={stickStyles.base} {...pan.panHandlers}>
       <View style={[stickStyles.knob, { transform: [{ translateX: knob.x }, { translateY: knob.y }] }]} />
@@ -71,9 +76,20 @@ export default function Screen({ ws, screen }: Props) {
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [mode, setMode] = useState<Mode>('MOUSE');
   const [kbOpen, setKbOpen] = useState(false);
-  const [zoom, setZoom] = useState({ s: 1, tx: 0, ty: 0 });
+  const [zoom, setZoom] = useState(RESET_ZOOM);
   const kbBuf = useRef('');
-  const send = (m: object) => ws?.readyState === 1 && ws.send(JSON.stringify(m));
+  const socketRef = useRef<WebSocket | null>(ws);
+
+  useEffect(() => {
+    socketRef.current = ws;
+  }, [ws]);
+
+  const send = (m: object) => {
+    const socket = socketRef.current;
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify(m));
+    }
+  };
 
   // ── WebRTC: phone is the answerer; daemon sends the offer ──
   useEffect(() => {
@@ -88,14 +104,21 @@ export default function Screen({ ws, screen }: Props) {
     });
 
     const onMsg = async (ev: MessageEvent) => {
-      const msg = JSON.parse(ev.data);
+      let msg;
+      try {
+        msg = JSON.parse(ev.data);
+      } catch {
+        return;
+      }
       if (msg.type === 'webrtc-offer') {
         await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: msg.sdp }));
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
         send({ type: 'webrtc-answer', sdp: answer.sdp });
       } else if (msg.type === 'webrtc-ice' && msg.candidate) {
-        try { await pc.addIceCandidate(new RTCIceCandidate(msg.candidate)); } catch {}
+        try {
+          await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+        } catch {}
       }
     };
     ws.addEventListener('message', onMsg);
@@ -104,6 +127,7 @@ export default function Screen({ ws, screen }: Props) {
     return () => {
       ws.removeEventListener('message', onMsg);
       send({ type: 'webrtc-stop' });
+      setStream(null);
       pc.close();
     };
   }, [ws]);
@@ -113,7 +137,6 @@ export default function Screen({ ws, screen }: Props) {
   const zoomRef = useRef(zoom); zoomRef.current = zoom;
   const size = useRef({ w: 1, h: 1 });
   const pendingAbs = useRef<{ nx: number; ny: number } | null>(null);
-  const scrollAcc = useRef({ dx: 0, dy: 0 });
   const lastTouch = useRef<{ x: number; y: number } | null>(null);
   const pinch = useRef<{ dist: number; mx: number; my: number } | null>(null);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -131,16 +154,25 @@ export default function Screen({ ws, screen }: Props) {
   };
 
   const flush = () => {
-    if (modeRef.current === 'SCROLL') {
-      const { dx, dy } = scrollAcc.current;
-      if (dx || dy) { send({ type: 'scroll', dx: -dx, dy: -dy }); scrollAcc.current = { dx: 0, dy: 0 }; }
-    } else if (pendingAbs.current) {
+    if (pendingAbs.current) {
       send({ type: 'moveabs', ...pendingAbs.current });
       pendingAbs.current = null;
     }
   };
 
   const stopTimer = () => { if (timer.current) { clearInterval(timer.current); timer.current = null; } };
+  const finishGesture = () => {
+    stopTimer();
+    flush();
+    if (!pinch.current) {
+      if (modeRef.current === 'DRAG') send({ type: 'mouseup', button: 'left' });
+      else if (modeRef.current === 'MOUSE' && Date.now() - startedAt.current < 220 && moved.current < 10) {
+        send({ type: 'click', button: 'left' });
+      }
+    }
+    lastTouch.current = null;
+    pinch.current = null;
+  };
 
   const pan = useRef(
     PanResponder.create({
@@ -151,12 +183,9 @@ export default function Screen({ ws, screen }: Props) {
         startedAt.current = Date.now();
         moved.current = 0;
         lastTouch.current = { x: locationX, y: locationY };
-        scrollAcc.current = { dx: 0, dy: 0 };
         pinch.current = null;
-        if (modeRef.current !== 'SCROLL') {
-          pendingAbs.current = norm(locationX, locationY);
-          if (modeRef.current === 'DRAG') { flush(); send({ type: 'mousedown', button: 'left' }); }
-        }
+        pendingAbs.current = norm(locationX, locationY);
+        if (modeRef.current === 'DRAG') { flush(); send({ type: 'mousedown', button: 'left' }); }
         timer.current = setInterval(flush, 16);
       },
       onPanResponderMove: (e) => {
@@ -187,29 +216,16 @@ export default function Screen({ ws, screen }: Props) {
         if (!timer.current) timer.current = setInterval(flush, 16);
         const { locationX, locationY } = e.nativeEvent;
         if (!lastTouch.current) { lastTouch.current = { x: locationX, y: locationY }; }
-        if (modeRef.current === 'SCROLL') {
-          scrollAcc.current.dx += Math.round((locationX - lastTouch.current.x) * 0.5);
-          scrollAcc.current.dy += Math.round((locationY - lastTouch.current.y) * 0.5);
-        } else {
-          pendingAbs.current = norm(locationX, locationY);
-        }
+        pendingAbs.current = norm(locationX, locationY);
         moved.current += Math.abs(locationX - lastTouch.current.x) + Math.abs(locationY - lastTouch.current.y);
         lastTouch.current = { x: locationX, y: locationY };
       },
-      onPanResponderRelease: () => {
-        stopTimer();
-        flush();
-        if (!pinch.current) {
-          if (modeRef.current === 'DRAG') send({ type: 'mouseup', button: 'left' });
-          else if (modeRef.current === 'MOUSE' && Date.now() - startedAt.current < 220 && moved.current < 10) {
-            send({ type: 'click', button: 'left' });
-          }
-        }
-        lastTouch.current = null;
-        pinch.current = null;
-      },
+      onPanResponderRelease: finishGesture,
+      onPanResponderTerminate: finishGesture,
     })
   ).current;
+
+  useEffect(() => finishGesture, []);
 
   const onLayout = (e: LayoutChangeEvent) => {
     size.current = { w: e.nativeEvent.layout.width, h: e.nativeEvent.layout.height };
@@ -243,7 +259,7 @@ export default function Screen({ ws, screen }: Props) {
           )}
         </View>
         {zoom.s > 1 && (
-          <TouchableOpacity style={styles.reset} onPress={() => setZoom({ s: 1, tx: 0, ty: 0 })}>
+          <TouchableOpacity style={styles.reset} onPress={() => setZoom(RESET_ZOOM)}>
             <Text style={styles.resetText}>{zoom.s.toFixed(1)}× · reset</Text>
           </TouchableOpacity>
         )}

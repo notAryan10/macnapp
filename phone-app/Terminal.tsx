@@ -1,4 +1,4 @@
-import { useRef, useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import {
   View, StyleSheet, TouchableOpacity, Text, KeyboardAvoidingView, Platform,
 } from 'react-native';
@@ -44,34 +44,74 @@ const KEYS: { label: string; seq: string }[] = [
 export default function Terminal({ ws }: { ws: WebSocket | null }) {
   const web = useRef<WebView>(null);
   const ready = useRef(false);
-  const buffer = useRef('');
+  const pendingOutput = useRef('');
+  const flushFrame = useRef<number | null>(null);
+  const socketRef = useRef<WebSocket | null>(ws);
 
-  const sendInput = (data: string) => ws?.send(JSON.stringify({ type: 'term_input', data }));
+  useEffect(() => {
+    socketRef.current = ws;
+  }, [ws]);
+
+  const sendInput = (data: string) => {
+    const socket = socketRef.current;
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'term_input', data }));
+    }
+  };
+  const flushOutput = () => {
+    if (!ready.current || !pendingOutput.current) return;
+    const chunk = pendingOutput.current;
+    pendingOutput.current = '';
+    web.current?.injectJavaScript(`window.writeTerm(${JSON.stringify(chunk)});true;`);
+  };
+  const scheduleFlush = () => {
+    if (!ready.current || !pendingOutput.current || flushFrame.current !== null) return;
+    flushFrame.current = requestAnimationFrame(() => {
+      flushFrame.current = null;
+      flushOutput();
+    });
+  };
+  const queueOutput = (data: string) => {
+    pendingOutput.current += data;
+    scheduleFlush();
+  };
 
   // PTY output -> xterm
   useEffect(() => {
     if (!ws) return;
     const handler = (e: MessageEvent) => {
-      const msg = JSON.parse(e.data);
+      let msg;
+      try {
+        msg = JSON.parse(e.data);
+      } catch {
+        return;
+      }
       if (msg.type !== 'term_output') return;
-      if (ready.current) web.current?.injectJavaScript(`window.writeTerm(${JSON.stringify(msg.data)});true;`);
-      else buffer.current += msg.data;
+      queueOutput(msg.data);
     };
     ws.addEventListener('message', handler);
     return () => ws.removeEventListener('message', handler);
   }, [ws]);
 
+  useEffect(() => () => {
+    if (flushFrame.current !== null) cancelAnimationFrame(flushFrame.current);
+  }, []);
+
   // xterm -> PTY (typing, and size -> resize the PTY so alignment is correct)
   const onMessage = (e: any) => {
-    const msg = JSON.parse(e.nativeEvent.data);
+    let msg;
+    try {
+      msg = JSON.parse(e.nativeEvent.data);
+    } catch {
+      return;
+    }
     if (msg.t === 'data') sendInput(msg.d);
-    else if (msg.t === 'size') ws?.send(JSON.stringify({ type: 'term_resize', cols: msg.cols, rows: msg.rows }));
+    else if (msg.t === 'size' && socketRef.current?.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({ type: 'term_resize', cols: msg.cols, rows: msg.rows }));
+    }
     else if (msg.t === 'ready') {
       ready.current = true;
-      if (buffer.current) {
-        web.current?.injectJavaScript(`window.writeTerm(${JSON.stringify(buffer.current)});true;`);
-        buffer.current = '';
-      }
+      scheduleFlush();
     }
   };
 

@@ -4,20 +4,35 @@ const input = require('./input');
 const { createTerminal } = require('./terminal');
 const { createSession } = require('./webrtc');
 const { isAuthorized } = require('./auth');
+const {
+  CLOSE_CODE,
+  allowConnection,
+  allowMessage,
+  allowUnauthorizedAttempt,
+} = require('./rate-limit');
 
 const PORT = Number(process.env.CMD_PORT || 3001);
 const wss = new WebSocketServer({ port: PORT });
 console.log(`Command channel on ws://localhost:${PORT}`);
+let nextSessionId = 1;
 
 // Keep the display awake while the daemon runs — avfoundation captures nothing
 // when the screen sleeps. (Can't bypass a *locked* session though.)
 spawn('caffeinate', ['-dimsu'], { stdio: 'ignore' });
 
 wss.on('connection', (ws, req) => {
-  if (!isAuthorized(req.url)) {
-    ws.close(4001, 'Unauthorized');
+  const clientIp = req.socket.remoteAddress || 'unknown';
+  if (!allowConnection(clientIp)) {
+    ws.close(CLOSE_CODE, 'Too many connections');
     return;
   }
+  if (!isAuthorized(req.url)) {
+    const closeCode = allowUnauthorizedAttempt(clientIp) ? 4001 : CLOSE_CODE;
+    const reason = closeCode === 4001 ? 'Unauthorized' : 'Too many auth attempts';
+    ws.close(closeCode, reason);
+    return;
+  }
+  const sessionId = `${clientIp}#${nextSessionId++}`;
   ws._socket.setNoDelay(true); // disable Nagle — send move packets immediately
   ws.send(JSON.stringify({ type: 'screen', ...input.screenSize })); // for touch mapping
   console.log('Phone connected');
@@ -27,6 +42,10 @@ wss.on('connection', (ws, req) => {
   ws.on('message', (raw) => {
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
+    if (!allowMessage(sessionId, msg)) {
+      ws.close(CLOSE_CODE, 'Rate limited');
+      return;
+    }
     switch (msg.type) {
       case 'move': input.moveCursor(msg); break;
       case 'moveabs': input.moveAbs(msg); break;

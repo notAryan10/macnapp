@@ -7,9 +7,60 @@ import {
 } from 'react-native-webrtc';
 import { C, MONO } from './theme';
 
-type Mode = 'MOUSE' | 'SCROLL' | 'DRAG';
-const MODES: Mode[] = ['MOUSE', 'SCROLL', 'DRAG'];
+type Mode = 'MOUSE' | 'DRAG';
+const MODES: Mode[] = ['MOUSE', 'DRAG'];
 const MAX_ZOOM = 4;
+
+// Continuous-scroll joystick: deflection sets scroll speed+direction, like Macky.
+function ScrollStick({ send }: { send: (m: object) => void }) {
+  const R = 38; // max knob deflection (px)
+  const [knob, setKnob] = useState({ x: 0, y: 0 });
+  const knobRef = useRef({ x: 0, y: 0 });
+  const timer = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const tick = () => {
+    const { x, y } = knobRef.current;
+    const sx = Math.round((x / R) * 6);
+    const sy = Math.round((y / R) * 6);
+    // push down → scroll down. Flip a sign here if your scroll feels reversed.
+    if (sx || sy) send({ type: 'scroll', dx: -sx, dy: -sy });
+  };
+
+  const pan = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderGrant: () => { if (!timer.current) timer.current = setInterval(tick, 50); },
+      onPanResponderMove: (_e, g) => {
+        let x = g.dx, y = g.dy;
+        const d = Math.hypot(x, y);
+        if (d > R) { x = (x / d) * R; y = (y / d) * R; }
+        knobRef.current = { x, y };
+        setKnob({ x, y });
+      },
+      onPanResponderRelease: () => {
+        knobRef.current = { x: 0, y: 0 };
+        setKnob({ x: 0, y: 0 });
+        if (timer.current) { clearInterval(timer.current); timer.current = null; }
+      },
+    })
+  ).current;
+
+  return (
+    <View style={stickStyles.base} {...pan.panHandlers}>
+      <View style={[stickStyles.knob, { transform: [{ translateX: knob.x }, { translateY: knob.y }] }]} />
+    </View>
+  );
+}
+
+const stickStyles = StyleSheet.create({
+  base: {
+    position: 'absolute', bottom: 20, right: 20, width: 104, height: 104, borderRadius: 52,
+    backgroundColor: '#000a', borderWidth: 1, borderColor: '#444',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  knob: { width: 44, height: 44, borderRadius: 22, backgroundColor: '#fff' },
+});
 
 type Props = {
   ws: WebSocket | null;
@@ -196,6 +247,7 @@ export default function Screen({ ws, screen }: Props) {
             <Text style={styles.resetText}>{zoom.s.toFixed(1)}× · reset</Text>
           </TouchableOpacity>
         )}
+        {stream && <ScrollStick send={send} />}
       </View>
 
       <View style={styles.bar}>
